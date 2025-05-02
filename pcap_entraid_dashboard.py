@@ -1,10 +1,9 @@
-# pcap_entraid_dashboard.py
+# pcap_entraid_dashboard.py (Scapy version)
 
 import os
 import json
 import time
 import tempfile
-import pyshark
 import pandas as pd
 import matplotlib.pyplot as plt
 import requests
@@ -12,6 +11,7 @@ import streamlit as st
 from collections import defaultdict
 from datetime import datetime
 from statistics import mean, stdev
+from scapy.all import rdpcap, IP, TCP, UDP, DNSQR
 
 # Use secrets from Streamlit Cloud
 ABUSE_KEY = st.secrets["ABUSEIPDB_API_KEY"]
@@ -64,17 +64,21 @@ def check_virustotal_domain(domain):
 
 # ---------- PCAP Parsing & C2 Detection ----------
 
-def extract_iocs(packet):
+def extract_iocs_scapy(pkt):
     try:
+        if not IP in pkt:
+            return None
+        proto = 'TCP' if TCP in pkt else 'UDP' if UDP in pkt else 'Other'
+        domain = pkt[DNSQR].qname.decode('utf-8') if pkt.haslayer(DNSQR) else ''
         return {
-            'timestamp': str(packet.sniff_time),
-            'src_ip': packet.ip.src,
-            'dst_ip': packet.ip.dst,
-            'protocol': packet.transport_layer,
-            'length': int(packet.length),
-            'domain': getattr(packet.dns, 'qry_name', '') if 'DNS' in packet else '',
-            'http_host': getattr(packet.http, 'host', '') if 'HTTP' in packet else '',
-            'http_uri': getattr(packet.http, 'request_uri', '') if 'HTTP' in packet else ''
+            'timestamp': datetime.fromtimestamp(pkt.time),
+            'src_ip': pkt[IP].src,
+            'dst_ip': pkt[IP].dst,
+            'protocol': proto,
+            'length': len(pkt),
+            'domain': domain,
+            'http_host': '',
+            'http_uri': ''
         }
     except:
         return None
@@ -131,15 +135,14 @@ def enrich_domains(df):
     return df
 
 def analyze_pcap(pcap_path):
-    cap = pyshark.FileCapture(pcap_path, only_summaries=False)
+    packets = rdpcap(pcap_path)
     iocs = []
     ip_time_map = defaultdict(list)
-    for pkt in cap:
-        ioc = extract_iocs(pkt)
+    for pkt in packets:
+        ioc = extract_iocs_scapy(pkt)
         if ioc:
             iocs.append(ioc)
-            ip_time_map[ioc['dst_ip']].append(datetime.strptime(ioc['timestamp'], "%Y-%m-%d %H:%M:%S.%f"))
-    cap.close()
+            ip_time_map[ioc['dst_ip']].append(ioc['timestamp'])
     df_iocs = pd.DataFrame(iocs)
     df_iocs = enrich_domains(df_iocs)
     c2_candidates = detect_beaconing(ip_time_map)
